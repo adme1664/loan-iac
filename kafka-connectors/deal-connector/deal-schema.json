@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Deal",
+  "description": "Deal document produced by commercialloan.deal_view (subject 3857.dev.deal.v1-deal_view-value).",
+  "type": "object",
+  "properties": {
+    "dealNo": { "type": "string" },
+    "deal": {
+      "type": "object",
+      "properties": {
+        "dealId": { "type": "string", "description": "UUID" },
+        "borrowingAgreementId": { "type": "string" },
+        "borrowingAgreementName": { "type": "string" },
+        "effectiveDate": { "type": "string", "description": "ISO 8601 date (YYYY-MM-DD)" },
+        "classificationCode": { "type": "string" },
+        "nextReviewDate": { "type": "string", "description": "ISO 8601 date (YYYY-MM-DD)" }
+      },
+      "required": ["dealId", "borrowingAgreementId"]
+    },
+    "creditFacilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "creditFacilityId": { "type": "string", "description": "UUID" },
+          "creditFacilityNo": { "type": "string" },
+          "borrowingAgreementId": { "type": "string" },
+          "creditFacilityName": { "type": "string" },
+          "statusCode": { "type": "string" },
+          "statusCodeSource": { "type": "string" },
+          "productCode": { "type": "string" },
+          "lenderRoleCode": { "type": "string" },
+          "effectiveDate": { "type": "string", "description": "ISO 8601 date (YYYY-MM-DD)" },
+          "expiryDate": { "type": "string", "description": "ISO 8601 date (YYYY-MM-DD)" },
+          "maturityDate": { "type": "string", "description": "ISO 8601 date (YYYY-MM-DD)" },
+          "currency": { "type": "string" },
+          "agreementRelations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "agreementRelationId": { "type": "string", "description": "UUID" },
+                "creditFacilityId": { "type": "string", "description": "UUID" },
+                "agreementId": { "type": "string" }
+              },
+              "required": ["agreementRelationId", "creditFacilityId", "agreementId"]
+            }
+          }
+        },
+        "required": ["creditFacilityId", "creditFacilityNo"]
+      }
+    },
+    "parties": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "partyId": { "type": "string", "description": "UUID" },
+          "dealId": { "type": "string", "description": "UUID" },
+          "unbankId": { "type": "string" },
+          "memberIdNo": { "type": "string" }
+        },
+        "required": ["partyId", "dealId"]
+      }
+    }
+  },
+  "required": ["dealNo", "deal"]
+}

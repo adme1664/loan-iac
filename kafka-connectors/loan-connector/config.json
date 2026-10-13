@@ -1,0 +1,5 @@
+{
+  "name": "Loan Agreement connector",
+  "topic": "3857.dev.loan.agreements.v1-loan_view",
+  "connectorFile": "loan-agreement-jdbc-connector.json"
+}

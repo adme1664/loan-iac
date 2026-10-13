@@ -1,0 +1,5 @@
+{
+  "name": "Letter Agreement connector",
+  "topic": "3857.dev.letter.agreements.v1-letter_view",
+  "connectorFile": "letter-agreement-jdbc-connector.json"
+}

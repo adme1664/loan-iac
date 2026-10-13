@@ -1,0 +1,408 @@
+name: bigdata
+
+services:
+  postgres:
+    image: postgres:${POSTGRES_VERSION}
+    container_name: bigdata-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    # Logical replication is required by the Debezium connector
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - bigdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  mongo:
+    image: mongo:${MONGO_VERSION}
+    container_name: bigdata-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_DB}
+    ports:
+      - "${MONGO_PORT}:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - bigdata
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'mongosh --quiet --eval "db.adminCommand(''ping'').ok" | grep -q 1',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  kafka:
+    image: apache/kafka:${KAFKA_VERSION}
+    container_name: bigdata-kafka
+    hostname: kafka
+    restart: unless-stopped
+    environment:
+      # KRaft: a single node acting as both broker and controller, no ZooKeeper
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # PLAINTEXT is for containers (kafka:9092), EXTERNAL for the host (localhost:${KAFKA_PORT})
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_PORT}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # Single broker: internal topics cannot be replicated
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports:
+      - "${KAFKA_PORT}:9094"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - bigdata
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:${SCHEMA_REGISTRY_VERSION}
+    container_name: bigdata-schema-registry
+    hostname: schema-registry
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      # Schemas are stored in the _schemas topic; single broker, so no replication
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "${SCHEMA_REGISTRY_PORT}:8081"
+    networks:
+      - bigdata
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/subjects > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  kafka-connect:
+    # Confluent Connect image extended with the JDBC connector and the JSON Schema SMT
+    build:
+      context: ./kafka-connect
+      args:
+        KAFKA_CONNECT_VERSION: ${KAFKA_CONNECT_VERSION}
+        KAFKA_CONNECT_JDBC_VERSION: ${KAFKA_CONNECT_JDBC_VERSION}
+        KAFKA_CONNECT_JSON_SCHEMA_VERSION: ${KAFKA_CONNECT_JSON_SCHEMA_VERSION}
+    image: bigdata-kafka-connect:${KAFKA_CONNECT_VERSION}
+    container_name: bigdata-kafka-connect
+    hostname: kafka-connect
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      CONNECT_GROUP_ID: bigdata-connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+      # Worker state lives in Kafka; single broker, so no replication
+      CONNECT_CONFIG_STORAGE_TOPIC: _connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      # Worker defaults (no Schema Registry); a connector can override them
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.json.JsonSchemaConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      # Lets connector configs reference container variables as ${env:NAME}
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      # Source database, read by the JDBC connectors
+      DB_HOST: ${DB_HOST}
+      DB_NAME: ${DB_NAME}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${KAFKA_CONNECT_PORT}:8083"
+    networks:
+      - bigdata
+    healthcheck:
+      test:
+        ["CMD-SHELL", "curl -fs http://localhost:8083/connectors > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:${KAFKA_UI_VERSION}
+    container_name: bigdata-kafka-ui
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: bigdata
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: bigdata-connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    networks:
+      - bigdata
+    healthcheck:
+      test:
+        ["CMD-SHELL", "wget -q --spider http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --- Stream processing: Flink session cluster (one JobManager, one TaskManager) ---
+
+  flink-jobmanager:
+    # Flink image extended with the Kafka SQL connector
+    build:
+      context: ./flink
+      args:
+        FLINK_VERSION: ${FLINK_VERSION}
+        FLINK_KAFKA_CONNECTOR_VERSION: ${FLINK_KAFKA_CONNECTOR_VERSION}
+    image: bigdata-flink:${FLINK_VERSION}
+    container_name: bigdata-flink-jobmanager
+    hostname: flink-jobmanager
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        parallelism.default: 1
+        execution.checkpointing.interval: 30s
+        execution.checkpointing.dir: file:///opt/flink/checkpoints
+    ports:
+      - "${FLINK_PORT}:8081"
+    volumes:
+      - ./flink/jobs:/opt/flink/jobs:ro
+      - flink-checkpoints:/opt/flink/checkpoints
+    networks:
+      - bigdata
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/overview > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  flink-taskmanager:
+    image: bigdata-flink:${FLINK_VERSION}
+    container_name: bigdata-flink-taskmanager
+    hostname: flink-taskmanager
+    restart: unless-stopped
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.rpc.port: 6122
+        parallelism.default: 1
+        execution.checkpointing.interval: 30s
+        execution.checkpointing.dir: file:///opt/flink/checkpoints
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+    networks:
+      - bigdata
+    healthcheck:
+      # No HTTP endpoint on a TaskManager: check that its RPC port is open
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/6122"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # --- Observability: Grafana shows the container logs (Loki) and metrics (Prometheus) ---
+
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION}
+    container_name: bigdata-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "${PROMETHEUS_PORT}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - bigdata
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  loki:
+    # Log store, queried by Grafana; uses the image's single-node configuration
+    image: grafana/loki:${LOKI_VERSION}
+    container_name: bigdata-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "${LOKI_PORT}:3100"
+    volumes:
+      - loki-data:/loki
+    networks:
+      - bigdata
+    # No healthcheck: the image has no shell or HTTP client to run one with
+
+  alloy:
+    # Reads the logs of the bigdata containers from Docker and pushes them to Loki
+    image: grafana/alloy:${ALLOY_VERSION}
+    container_name: bigdata-alloy
+    restart: unless-stopped
+    depends_on:
+      - loki
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    networks:
+      - bigdata
+    healthcheck:
+      # The image has bash but neither curl nor wget
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "exec 3<>/dev/tcp/localhost/12345 && printf 'GET /-/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  zipkin:
+    # Distributed tracing; applications send spans to http://localhost:${ZIPKIN_PORT}/api/v2/spans
+    image: openzipkin/zipkin:${ZIPKIN_VERSION}
+    container_name: bigdata-zipkin
+    restart: unless-stopped
+    environment:
+      # Traces are kept in memory and lost when the container restarts
+      STORAGE_TYPE: mem
+    ports:
+      - "${ZIPKIN_PORT}:9411"
+    networks:
+      - bigdata
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9411/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION}
+    container_name: bigdata-grafana
+    restart: unless-stopped
+    depends_on:
+      loki:
+        condition: service_started
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+    ports:
+      - "${GRAFANA_PORT}:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - bigdata
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  bigdata:
+    name: bigdata
+
+volumes:
+  postgres-data:
+    name: bigdata-postgres-data
+  mongo-data:
+    name: bigdata-mongo-data
+  kafka-data:
+    name: bigdata-kafka-data
+  flink-checkpoints:
+    name: bigdata-flink-checkpoints
+  prometheus-data:
+    name: bigdata-prometheus-data
+  loki-data:
+    name: bigdata-loki-data
+  alloy-data:
+    name: bigdata-alloy-data
+  grafana-data:
+    name: bigdata-grafana-data

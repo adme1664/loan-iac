@@ -1,0 +1,5 @@
+{
+  "name": "Deal connector",
+  "topic": "3857.dev.deal.v1-deal_view",
+  "connectorFile": "deal-jdbc-connector.json"
+}

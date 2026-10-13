@@ -1,0 +1,5 @@
+{
+  "name": "Loc Agreement connector",
+  "topic": "3857.dev.loc.agreements.v1-loc_view",
+  "connectorFile": "loc-agreement-jdbc-connector.json"
+}
